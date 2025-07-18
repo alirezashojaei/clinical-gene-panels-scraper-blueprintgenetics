@@ -34,30 +34,38 @@ class PanelsDatabaseManager:
         if not all(col in self.panel_columns for col in panels.columns):
             raise ValueError(f"Panels must have the required columns: {self.panel_columns}")
         
-       # Check each panel one by one
-        for ـ, panel in panels.iterrows():
-            # Check if this panel already exists in the database
-            existing_panel = self.database[
-                (self.database['category'] == panel['category']) &
-                (self.database['panel_name'] == panel['panel_name']) &
-                (self.database['link'] == panel['link'])
-            ]
+        # Make a backup of the database before making changes
+        database_backup = self.database.copy(deep=True)
+        try:
+            # Check each panel one by one
+            for _, panel in panels.iterrows():
+                # Check if this panel already exists in the database
+                existing_panel = self.database[
+                    (self.database['category'] == panel['category']) &
+                    (self.database['panel_name'] == panel['panel_name']) &
+                    (self.database['link'] == panel['link'])
+                ]
 
-            # If panel doesn't exist, add it to the database
-            if existing_panel.empty:
-                # Create a new row with the panel data and empty values for gene-related columns
-                new_row = panel.copy()
-                # Use pandas' reindex to ensure all columns are present and fill missing ones with empty string
-                new_row = new_row.reindex(self.columns, fill_value='')
-                
-                # Add the new panel to the database
-                self.database = pd.concat([self.database, pd.DataFrame([new_row])], ignore_index=True)
+                # If panel doesn't exist, add it to the database
+                if existing_panel.empty:
+                    # Create a new row with the panel data and empty values for gene-related columns
+                    new_row = panel.copy()
+                    # Use pandas' reindex to ensure all columns are present and fill missing ones with empty string
+                    new_row = new_row.reindex(self.columns, fill_value='')
 
-    def update_panel_content(self, panel_name: str, panel_content: pd.DataFrame):
+                    # Add the new panel to the database
+                    self.database = pd.concat([self.database, pd.DataFrame([new_row])], ignore_index=True)
+        except Exception as e:
+            # Rollback to the backup if any error occurs
+            self.database = database_backup
+            raise e
+
+    def update_panel_content(self, category: str, panel_name: str, panel_content: pd.DataFrame):
         """
         Add or update panel content to the database.
 
         Args:
+            category (str): The category of the panel to add content to.
             panel_name (str): The name of the panel to add content to.
             panel_content (pd.DataFrame): A pandas DataFrame containing the panel content to add. Should have the same columns as the self.panel_content_columns.
         """
@@ -66,23 +74,36 @@ class PanelsDatabaseManager:
         
         if not all(col in self.panel_content_columns for col in panel_content.columns):
             raise ValueError(f"Panel content must have the required columns: {self.panel_content_columns}")
-        
-        # Check if the panel exists
-        panel = self.database[self.database['panel_name'] == panel_name]
-        if panel.empty:
-            raise ValueError(f"Panel {panel_name} does not exist")
-        
-        # Fill three empty columns: category, panel_name, link from the existing panel info
-        panel_row = self.database[self.database['panel_name'] == panel_name]
+            
+        database_backup = self.database.copy(deep=True)
+        try:
+            # Check if the panel exists
+            panel = self.database[
+                (self.database['category'] == category) &
+                (self.database['panel_name'] == panel_name)
+            ]
+            if panel.empty:
+                raise ValueError(f"Panel {panel_name} does not exist")
+            
+            # Fill three empty columns: category, panel_name, link from the existing panel info
+            panel_row = self.database[
+                (self.database['category'] == category) &
+                (self.database['panel_name'] == panel_name)
+            ]
 
-        # Delete the existing panel content to avoid duplicates
-        self.database = self.database[self.database['panel_name'] != panel_name]
-        
-        panel_content['category'] = panel_row['category'].values[0]
-        panel_content['panel_name'] = panel_row['panel_name'].values[0]
-        panel_content['link'] = panel_row['link'].values[0]
+            # Delete only the records that match both category and panel_name to avoid duplicates
+            self.database = self.database[
+                ~((self.database['category'] == category) & (self.database['panel_name'] == panel_name))
+            ]
+            
+            panel_content['category'] = panel_row['category'].values[0]
+            panel_content['panel_name'] = panel_row['panel_name'].values[0]
+            panel_content['link'] = panel_row['link'].values[0]
 
-        self.database = pd.concat([self.database, panel_content], ignore_index=True)
+            self.database = pd.concat([self.database, panel_content], ignore_index=True)
+        except Exception as e:
+            self.database = database_backup
+            raise e
 
     def get_panels(self, has_not_content: bool = False):
         """
