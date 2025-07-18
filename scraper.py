@@ -1,17 +1,55 @@
-import csv
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
 import pandas as pd
-import time
-import re
 
+class BlueprintgeneicsScraper:
+    def __init__(self):
+        self.blueprintgenetics_test_panels_url = "https://blueprintgenetics.com/tests/panels/"
 
-def scrape_panel_data(url, panel_name, category):
-    """Scrape data from a single panel page"""
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
+    async def fetch_soup(self, url: str):
+        """
+        Fetch the HTML content from the given URL and parse it with BeautifulSoup.
+        """
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                soup = BeautifulSoup(await response.text(), 'html.parser')
+                return soup
+    
+    async def scrape_test_panels(self):
+        soup = await self.fetch_soup(self.blueprintgenetics_test_panels_url)
+
+        # Find all collapse sections
+        collapse_sections = soup.select("div.collapse-section")
+        data = []
+        for category in collapse_sections:
+            # Find the toggle-collapse link to get category name
+            toggle_link = category.select_one("a.toggle-collapse")
+            if toggle_link:
+                category_name = toggle_link.get_text(strip=True)
+                
+                # Find all test-list-item divs within this section
+                test_items = category.select("div.test-list-item")
+                
+                for item in test_items:
+                    # Find the link within the test-list-item
+                    link_tag = item.select_one("a")
+                    if link_tag:
+                        panel_name = link_tag.get_text(strip=True)
+                        href = link_tag.get("href")
+                        
+                        # Clean up panel name (remove any extra text like "New" badges)
+                        if "New" in panel_name:
+                            panel_name = panel_name.replace("New", "").strip()
+                        
+                        data.append([category_name, panel_name, href])
+
+        return pd.DataFrame(data, columns=['category', 'panel_name', 'link'])
+    
+    async def scrape_test_panel_content(self, panel_link: str):
+        """
+        Scrape the content of a test panel.
+        """
+        soup = await self.fetch_soup(panel_link)
         
         # Find all table-responsive divs
         table_divs = soup.find_all("div", class_="table-responsive")
@@ -22,9 +60,9 @@ def scrape_panel_data(url, panel_name, category):
             table = div.find("table")
             if not table:
                 continue
-                
+
             # Determine if this is coding or non-coding table
-            is_coding = i == 0  # First table is coding, second is non-coding
+            is_coding = i == 0  # First table is coding, second is non-coding # TODO: check if this is correct
             
             # Get table headers
             headers = []
@@ -38,87 +76,33 @@ def scrape_panel_data(url, panel_name, category):
             for row in rows:
                 cells = row.find_all("td")
                 if len(cells) >= len(headers):
-                    row_data = {
-                        'Category': category,
-                        'Panel': panel_name,
-                        'Table_Type': 'Coding' if is_coding else 'Non-coding'
-                    }
                     
                     # Add data based on table type
                     if is_coding and len(cells) >= 5:
-                        row_data.update({
-                            'Gene': cells[0].get_text(strip=True),
-                            'Associated_phenotypes': cells[1].get_text(strip=True),
-                            'Inheritance': cells[2].get_text(strip=True),
-                            'ClinVar': cells[3].get_text(strip=True),
-                            'HGMD': cells[4].get_text(strip=True),
-                            'Coding': 'Yes'
-                        })
+                        row_data = {
+                            'gene': cells[0].get_text(strip=True),
+                            'genomic_location_hg19': '',
+                            'hgvs': '',
+                            'refseq': '',
+                            'associated_phenotypes': cells[1].get_text(strip=True),
+                            'inheritance': cells[2].get_text(strip=True),
+                            'clinvar': cells[3].get_text(strip=True),
+                            'hgmd': cells[4].get_text(strip=True),
+                            'coding': True
+                        }
                     elif not is_coding and len(cells) >= 5:
-                        row_data.update({
-                            'Gene': cells[0].get_text(strip=True),
-                            'Associated_phenotypes': '',  # Non-coding doesn't have phenotypes
-                            'Inheritance': '',  # Non-coding doesn't have inheritance
-                            'ClinVar': '',  # Non-coding doesn't have ClinVar
-                            'HGMD': '',  # Non-coding doesn't have HGMD
-                            'Coding': 'No'
-                        })
+                        row_data = {
+                            'gene': cells[0].get_text(strip=True),
+                            'genomic_location_hg19': cells[1].get_text(strip=True),
+                            'hgvs': cells[2].get_text(strip=True),
+                            'refseq': cells[3].get_text(strip=True),
+                            'associated_phenotypes': '', 
+                            'inheritance': '', 
+                            'clinvar': '', 
+                            'hgmd': '', 
+                            'coding': False
+                        }
                     
                     data.append(row_data)
         
-        return data
-        
-    except Exception as e:
-        print(f"Error scraping {url}: {e}")
-        return []
-
-
-def main():
-    # Read the existing CSV file with panel links
-    panels_df = pd.read_csv("data.csv")
-    
-    all_data = []
-    
-    print(f"Starting to scrape {len(panels_df)} panels...")
-    
-    for index, row in panels_df.iterrows():
-        category = row['category']
-        panel_name = row['panel_name']
-        panel_url = row['link']
-        
-        print(f"Scraping panel {index + 1}/{len(panels_df)}: {panel_name}")
-        
-        # Scrape data from this panel
-        panel_data = scrape_panel_data(panel_url, panel_name, category)
-        all_data.extend(panel_data)
-        
-        # Add a small delay to be respectful to the server
-        time.sleep(1)
-    
-    # Convert to DataFrame
-    if all_data:
-        df = pd.DataFrame(all_data)
-        
-        # Reorder columns to match requested format
-        column_order = ['Category', 'Panel', 'Gene', 'Associated_phenotypes', 'Inheritance', 'ClinVar', 'HGMD', 'Coding', 'Table_Type']
-        df = df[column_order]
-        
-        # Save to CSV
-        df.to_csv("panel_data.csv", index=False)
-        print(f"✅ Successfully scraped data for {len(df)} entries from {len(panels_df)} panels!")
-        print(f"Data saved to panel_data.csv")
-        
-        # Print summary
-        print(f"\nSummary:")
-        print(f"Total entries: {len(df)}")
-        print(f"Coding entries: {len(df[df['Coding'] == 'Yes'])}")
-        print(f"Non-coding entries: {len(df[df['Coding'] == 'No'])}")
-        print(f"Unique panels: {df['Panel'].nunique()}")
-        print(f"Unique genes: {df['Gene'].nunique()}")
-        
-    else:
-        print("❌ No data was scraped!")
-
-
-if __name__ == "__main__":
-    main()
+        return pd.DataFrame(data)
